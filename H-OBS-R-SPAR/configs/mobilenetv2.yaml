@@ -1,0 +1,72 @@
+# MobileNetV2 Configuration
+
+model:
+  name: "mobilenetv2"
+  pretrained: true
+  num_classes: 1000
+
+dataset:
+  name: "imagenet"
+  data_dir: "/data/imagenet"
+  image_size: 224
+  num_workers: 16
+  pin_memory: true
+
+training:
+  batch_size: 256
+  epochs: 150
+  optimizer: "SGD"
+  learning_rate: 0.045
+  momentum: 0.9
+  weight_decay: 0.00004
+  lr_schedule: "cosine"
+  warmup_epochs: 5
+
+pruning:
+  method: "hobs-rspar"
+  target_flops_reduction: 0.71
+  target_params_reduction: 0.65
+
+  hobs:
+    use_kfac: true
+    damping: 0.001
+    num_batches_sensitivity: 50
+
+  rspar:
+    num_episodes: 120
+    hidden_dim: 128
+    learning_rate: 0.0003
+    gamma: 0.99
+    clip_epsilon: 0.2
+
+  regularization:
+    lambda_init: 0.01
+    tau: 2.5
+    lambda_min: 0.0001
+    lambda_max: 0.1
+
+finetuning:
+  epochs: 50
+  learning_rate: 0.01
+  batch_size: 256
+  use_knowledge_distillation: true
+  kd_temperature: 3.0
+  kd_alpha: 0.7
+
+evaluation:
+  batch_size: 64
+  num_iterations_latency: 100
+  num_iterations_throughput: 50
+
+system:
+  gpu_id: 0
+  fp16: false
+  benchmark: true
+  deterministic: false
+
+experiment:
+  name: "mobilenetv2_hobs_rspar"
+  save_dir: "./results/mobilenetv2"
+  log_interval: 100
+  save_interval: 10
+  random_seeds: [42, 2024, 10086, 520, 1314]

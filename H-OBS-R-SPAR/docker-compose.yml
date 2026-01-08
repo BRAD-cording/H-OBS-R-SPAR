@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  hobs-rspar:
+    build: .
+    image: hobs-rspar:latest
+    container_name: hobs-rspar-container
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ./data:/workspace/H-OBS-R-SPAR/data
+      - ./results:/workspace/H-OBS-R-SPAR/results
+      - ./checkpoints:/workspace/H-OBS-R-SPAR/checkpoints
+    shm_size: '16gb'
+    stdin_open: true
+    tty: true
+    command: bash
