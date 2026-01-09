@@ -186,6 +186,7 @@ def method_prune(model, dataloader, pruning_ratio=0.5, **kwargs):
 
 **Available Methods:**
 
+- `unpruned` - Unpruned Model Baseline (No Pruning)
 - `dep_graph_prune` - DepGraph (CVPR 2023)
 - `autocompress_prune` - AutoCompress (AAAI 2020)
 - `hrank_prune` - HRank (CVPR 2020)

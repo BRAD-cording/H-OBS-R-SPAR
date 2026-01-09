@@ -1,467 +1,389 @@
-"""
-R-SPAR: Reinforcement Learning-driven Structured Pruning with Adaptive Regularization
-
-This is a core contribution of our paper.
-
-Key Innovation:
-- Models layer-wise budget allocation as Markov Decision Process (MDP)
-- Uses PPO (Proximal Policy Optimization) for policy learning
-- Adaptive regularization λ(t) based on training dynamics
-- Achieves 0.5-0.8% accuracy improvement over uniform/greedy strategies
-
-MDP Formulation:
-- State s_t: [layer_features, current_pruning_ratios, accuracy_drop]
-- Action a_t: Adjust pruning ratio for each layer
-- Reward r_t: -accuracy_drop - regularization_penalty
-- Policy π(a|s): Neural network mapping states to actions
-
-Adaptive Regularization:
-  λ(t) = λ₀ × exp(-τ × (Acc_train(t) - Acc_pruned(t)))
-  
-Where:
-  - λ₀: Initial regularization strength
-  - τ: Temperature parameter (controls sensitivity)
-  - Acc difference: Training vs pruned model accuracy gap
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal
+import torch.optim as optim
 import numpy as np
 from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
-from collections import deque
+import copy
 
-
-@dataclass
 class MDPState:
-    """State representation for budget allocation MDP."""
-    layer_features: np.ndarray  # [num_layers, feature_dim]
-    current_ratios: np.ndarray  # [num_layers]
-    accuracy_drop: float
-    epoch: int
-
-
-@dataclass
-class Experience:
-    """Experience tuple for RL training."""
-    state: MDPState
-    action: np.ndarray
-    reward: float
-    next_state: MDPState
-    done: bool
-    log_prob: float
-
-
-class PolicyNetwork(nn.Module):
     """
-    Policy network for budget allocation.
-    Maps MDP states to pruning ratio distributions.
+    MDP状态表示用于R-SPAR的预算分配
+    """
+    def __init__(self, layer_features: np.ndarray, current_ratios: np.ndarray, accuracy_drop: float):
+        """
+        初始化MDP状态
+        
+        Args:
+            layer_features: 层特征向量（包含敏感度分数、通道数等）
+            current_ratios: 当前层剪枝比例
+            accuracy_drop: 当前精度下降
+        """
+        self.layer_features = layer_features
+        self.current_ratios = current_ratios
+        self.accuracy_drop = accuracy_drop
+    
+    def to_tensor(self) -> torch.Tensor:
+        """
+        将状态转换为张量
+        
+        Returns:
+            状态张量
+        """
+        features = np.concatenate([
+            self.layer_features.flatten(),
+            self.current_ratios.flatten(),
+            [self.accuracy_drop]
+        ])
+        return torch.tensor(features, dtype=torch.float32)
+
+class Actor(nn.Module):
+    """
+    PPO算法的Actor网络
     """
     def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 256):
-        super().__init__()
+        """
+        初始化Actor网络
         
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        
-        # Feature extractor
-        self.feature_net = nn.Sequential(
+        Args:
+            state_dim: 状态维度
+            action_dim: 动作维度
+            hidden_dim: 隐藏层维度
+        """
+        super(Actor, self).__init__()
+        self.network = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim)
         )
-        
-        # Policy head (mean and std for continuous actions)
-        self.mean_head = nn.Sequential(
-            nn.Linear(hidden_dim, action_dim),
-            nn.Sigmoid()  # Pruning ratios in [0, 1]
-        )
-        
-        self.std_head = nn.Sequential(
-            nn.Linear(hidden_dim, action_dim),
-            nn.Softplus()  # Ensure positive std
-        )
-        
+        self.std = nn.Parameter(torch.ones(action_dim) * 0.1)
+    
     def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass.
+        前向传播
         
         Args:
-            state: State tensor [batch, state_dim]
-        
+            state: 状态张量
+            
         Returns:
-            (mean, std) of action distribution
+            动作均值和标准差
         """
-        features = self.feature_net(state)
-        mean = self.mean_head(features)
-        std = self.std_head(features) + 1e-5  # Numerical stability
+        mean = torch.sigmoid(self.network(state))  # 确保输出在0-1之间
+        std = self.std.exp().clamp(min=1e-3, max=1.0)  # 确保标准差为正且合理
         return mean, std
     
-    def get_action(
-        self, 
-        state: torch.Tensor,
-        deterministic: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def select_action(self, state: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
         """
-        Sample action from policy.
+        选择动作
         
         Args:
-            state: State tensor
-            deterministic: If True, return mean action
-        
+            state: 状态张量
+            deterministic: 是否使用确定性策略
+            
         Returns:
-            (action, log_prob)
+            动作张量
         """
         mean, std = self.forward(state)
-        
         if deterministic:
-            action = mean
-            log_prob = torch.zeros_like(action)
-        else:
-            dist = Normal(mean, std)
-            action = dist.sample()
-            log_prob = dist.log_prob(action).sum(dim=-1)
-            
-            # Clip to [0, 0.9] range
-            action = torch.clamp(action, 0.0, 0.9)
+            return mean
         
-        return action, log_prob
+        # 采样动作
+        dist = torch.distributions.Normal(mean, std)
+        action = dist.sample()
+        
+        # 确保动作在0-1之间
+        return torch.clamp(action, 0.0, 1.0)
 
-
-class ValueNetwork(nn.Module):
-    """Value network for advantage estimation."""
+class Critic(nn.Module):
+    """
+    PPO算法的Critic网络
+    """
     def __init__(self, state_dim: int, hidden_dim: int = 256):
-        super().__init__()
+        """
+        初始化Critic网络
         
-        self.net = nn.Sequential(
+        Args:
+            state_dim: 状态维度
+            hidden_dim: 隐藏层维度
+        """
+        super(Critic, self).__init__()
+        self.network = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
     
     def forward(self, state: torch.Tensor) -> torch.Tensor:
-        """Predict state value."""
-        return self.net(state).squeeze(-1)
-
-
-class AdaptiveRegularizer:
-    """
-    Adaptive regularization for stable pruning.
-    Adjusts λ based on accuracy drop during training.
-    """
-    def __init__(
-        self,
-        lambda_init: float = 0.01,
-        tau: float = 2.5,
-        lambda_min: float = 1e-4,
-        lambda_max: float = 0.1
-    ):
         """
-        Args:
-            lambda_init: Initial regularization strength
-            tau: Temperature parameter
-            lambda_min: Minimum lambda value
-            lambda_max: Maximum lambda value
-        """
-        self.lambda_current = lambda_init
-        self.lambda_init = lambda_init
-        self.tau = tau
-        self.lambda_min = lambda_min
-        self.lambda_max = lambda_max
-        
-        self.history = []
-    
-    def update(self, acc_train: float, acc_pruned: float) -> float:
-        """
-        Update lambda based on accuracy gap.
-        
-        Formula:
-            λ(t) = λ₀ × exp(-τ × (Acc_train - Acc_pruned))
+        前向传播
         
         Args:
-            acc_train: Training accuracy
-            acc_pruned: Pruned model accuracy
-        
+            state: 状态张量
+            
         Returns:
-            Updated lambda value
+            状态值函数
         """
-        acc_gap = max(acc_train - acc_pruned, 0.0)
-        
-        # Exponential adjustment
-        self.lambda_current = self.lambda_init * np.exp(-self.tau * acc_gap)
-        
-        # Clip to valid range
-        self.lambda_current = np.clip(
-            self.lambda_current,
-            self.lambda_min,
-            self.lambda_max
-        )
-        
-        self.history.append(self.lambda_current)
-        return self.lambda_current
-    
-    def get_lambda(self) -> float:
-        """Get current lambda value."""
-        return self.lambda_current
-
+        return self.network(state)
 
 class RSPARAgent:
     """
-    R-SPAR: Reinforcement Learning agent for structured pruning budget allocation.
-    Uses PPO algorithm for stable policy learning.
+    强化学习驱动的结构化剪枝代理（R-SPAR）
+    
+    使用PPO算法学习最优的层级剪枝比例分配策略
     """
-    def __init__(
-        self,
-        num_layers: int,
-        layer_feature_dim: int = 3,
-        hidden_dim: int = 256,
-        lr: float = 3e-4,
-        gamma: float = 0.99,
-        clip_epsilon: float = 0.2,
-        lambda_gae: float = 0.95
-    ):
+    
+    def __init__(self, num_layers: int, layer_feature_dim: int = 3, hidden_dim: int = 256,
+                 lr: float = 3e-4, gamma: float = 0.99, clip_epsilon: float = 0.2,
+                 value_coef: float = 0.5, entropy_coef: float = 0.01):
         """
+        初始化R-SPAR代理
+        
         Args:
-            num_layers: Number of layers to allocate budgets for
-            layer_feature_dim: Dimension of layer features
-            hidden_dim: Hidden dimension for networks
-            lr: Learning rate
-            gamma: Discount factor
-            clip_epsilon: PPO clipping parameter
-            lambda_gae: GAE lambda for advantage estimation
+            num_layers: 可剪枝层的数量
+            layer_feature_dim: 每层的特征维度
+            hidden_dim: 网络隐藏层维度
+            lr: 学习率
+            gamma: 折扣因子
+            clip_epsilon: PPO裁剪参数
+            value_coef: 值函数损失系数
+            entropy_coef: 熵正则化系数
         """
         self.num_layers = num_layers
         self.layer_feature_dim = layer_feature_dim
+        
+        # 状态维度：层特征 + 当前剪枝比例 + 精度下降
+        state_dim = num_layers * layer_feature_dim + num_layers + 1
+        action_dim = num_layers  # 每个层的剪枝比例
+        
+        # 创建Actor和Critic网络
+        self.actor = Actor(state_dim, action_dim, hidden_dim)
+        self.critic = Critic(state_dim, hidden_dim)
+        
+        # 优化器
+        self.optimizer = optim.Adam(
+            list(self.actor.parameters()) + list(self.critic.parameters()),
+            lr=lr
+        )
+        
+        # PPO参数
         self.gamma = gamma
         self.clip_epsilon = clip_epsilon
-        self.lambda_gae = lambda_gae
+        self.value_coef = value_coef
+        self.entropy_coef = entropy_coef
         
-        # State dimension: layer_features + current_ratios + accuracy_drop + epoch
-        state_dim = num_layers * layer_feature_dim + num_layers + 1 + 1
-        action_dim = num_layers
-        
-        # Networks
-        self.policy = PolicyNetwork(state_dim, action_dim, hidden_dim)
-        self.value = ValueNetwork(state_dim, hidden_dim)
-        
-        # Optimizers
-        self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
-        self.value_optimizer = torch.optim.Adam(self.value.parameters(), lr=lr)
-        
-        # Experience buffer
-        self.buffer = deque(maxlen=1000)
-        
-        # Adaptive regularization
-        self.regularizer = AdaptiveRegularizer()
-        
-        # Statistics
-        self.episode_rewards = []
-        self.policy_losses = []
-        self.value_losses = []
+        # 经验缓冲区
+        self.states = []
+        self.actions = []
+        self.rewards = []
+        self.dones = []
+        self.log_probs = []
+        self.values = []
     
-    def state_to_tensor(self, state: MDPState) -> torch.Tensor:
+    def select_action(self, state: MDPState, deterministic: bool = False) -> Tuple[torch.Tensor, float, float]:
         """
-        Convert MDP state to tensor.
+        选择动作
         
         Args:
-            state: MDP state
-        
+            state: MDP状态
+            deterministic: 是否使用确定性策略
+            
         Returns:
-            State tensor
+            动作、对数概率和状态值
         """
-        # Flatten and concatenate all state components
-        layer_features_flat = state.layer_features.flatten()
+        state_tensor = state.to_tensor().unsqueeze(0)
         
-        components = [
-            layer_features_flat,
-            state.current_ratios,
-            np.array([state.accuracy_drop]),
-            np.array([state.epoch / 100.0])  # Normalize epoch
-        ]
+        # 获取动作分布
+        mean, std = self.actor(state_tensor)
+        dist = torch.distributions.Normal(mean, std)
         
-        state_vector = np.concatenate(components)
-        return torch.FloatTensor(state_vector).unsqueeze(0)
+        if deterministic:
+            action = mean
+        else:
+            action = dist.sample()
+        
+        # 确保动作在0-1之间
+        action = torch.clamp(action, 0.0, 1.0)
+        
+        # 计算对数概率和熵
+        log_prob = dist.log_prob(action).sum(dim=1)
+        
+        # 获取状态值
+        value = self.critic(state_tensor)
+        
+        return action.squeeze(), log_prob.item(), value.squeeze().item()
     
-    def select_action(
-        self,
-        state: MDPState,
-        deterministic: bool = False
-    ) -> Tuple[np.ndarray, float]:
+    def store_transition(self, state: MDPState, action: torch.Tensor, reward: float, 
+                        done: bool, log_prob: float, value: float):
         """
-        Select action (pruning ratios) given current state.
+        存储转换样本
         
         Args:
-            state: Current MDP state
-            deterministic: If True, select mean action
-        
-        Returns:
-            (action, log_prob)
+            state: MDP状态
+            action: 动作
+            reward: 奖励
+            done: 是否结束
+            log_prob: 对数概率
+            value: 状态值
         """
-        state_tensor = self.state_to_tensor(state)
-        
-        with torch.no_grad():
-            action, log_prob = self.policy.get_action(state_tensor, deterministic)
-        
-        return action.squeeze(0).numpy(), log_prob.item()
+        self.states.append(state.to_tensor())
+        self.actions.append(action)
+        self.rewards.append(reward)
+        self.dones.append(done)
+        self.log_probs.append(log_prob)
+        self.values.append(value)
     
-    def compute_reward(
-        self,
-        accuracy_drop: float,
-        flops_reduction: float,
-        target_flops: float = 0.5
-    ) -> float:
+    def update(self, num_epochs: int = 10, batch_size: int = 32):
         """
-        Compute reward for current state.
-        
-        Reward function:
-            r = -accuracy_drop - λ × |flops_reduction - target|
+        更新Actor和Critic网络
         
         Args:
-            accuracy_drop: Accuracy loss from pruning
-            flops_reduction: Achieved FLOPs reduction
-            target_flops: Target FLOPs reduction
-        
-        Returns:
-            Reward value
+            num_epochs: 更新轮数
+            batch_size: 批次大小
         """
-        # Accuracy preservation reward (higher is better)
-        acc_reward = -accuracy_drop * 10.0
+        # 计算回报和优势函数
+        returns = self._compute_returns()
+        advantages = self._compute_advantages(returns)
         
-        # FLOPs target reward
-        flops_diff = abs(flops_reduction - target_flops)
-        flops_penalty = -flops_diff * 5.0
+        # 转换为张量
+        states = torch.stack(self.states)
+        actions = torch.stack(self.actions)
+        old_log_probs = torch.tensor(self.log_probs, dtype=torch.float32)
+        returns = torch.tensor(returns, dtype=torch.float32)
+        advantages = torch.tensor(advantages, dtype=torch.float32)
         
-        # Regularization
-        lambda_current = self.regularizer.get_lambda()
-        reg_penalty = -lambda_current * flops_diff
-        
-        reward = acc_reward + flops_penalty + reg_penalty
-        return reward
-    
-    def update_policy(self, batch_size: int = 64, epochs: int = 10):
-        """
-        Update policy using PPO algorithm.
-        
-        Args:
-            batch_size: Batch size for updates
-            epochs: Number of epochs to train on buffer
-        """
-        if len(self.buffer) < batch_size:
-            return
-        
-        # Sample from buffer
-        experiences = list(self.buffer)
-        
-        # Convert to tensors
-        states = torch.stack([self.state_to_tensor(exp.state).squeeze(0) 
-                             for exp in experiences])
-        actions = torch.FloatTensor([exp.action for exp in experiences])
-        old_log_probs = torch.FloatTensor([exp.log_prob for exp in experiences])
-        rewards = torch.FloatTensor([exp.reward for exp in experiences])
-        
-        # Compute returns and advantages
-        returns = self._compute_returns(rewards)
-        values = self.value(states).detach()
-        advantages = returns - values
+        # 归一化优势函数
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
-        # PPO update
-        for _ in range(epochs):
-            # Policy loss
-            mean, std = self.policy(states)
-            dist = Normal(mean, std)
-            new_log_probs = dist.log_prob(actions).sum(dim=-1)
+        # 执行PPO更新
+        for epoch in range(num_epochs):
+            # 打乱数据
+            indices = torch.randperm(states.size(0))
             
-            ratio = torch.exp(new_log_probs - old_log_probs)
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages
-            policy_loss = -torch.min(surr1, surr2).mean()
-            
-            # Value loss
-            value_pred = self.value(states)
-            value_loss = F.mse_loss(value_pred, returns)
-            
-            # Update networks
-            self.policy_optimizer.zero_grad()
-            policy_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
-            self.policy_optimizer.step()
-            
-            self.value_optimizer.zero_grad()
-            value_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.value.parameters(), 0.5)
-            self.value_optimizer.step()
-            
-            self.policy_losses.append(policy_loss.item())
-            self.value_losses.append(value_loss.item())
+            for i in range(0, states.size(0), batch_size):
+                # 获取批次数据
+                batch_indices = indices[i:i+batch_size]
+                batch_states = states[batch_indices]
+                batch_actions = actions[batch_indices]
+                batch_old_log_probs = old_log_probs[batch_indices]
+                batch_returns = returns[batch_indices]
+                batch_advantages = advantages[batch_indices]
+                
+                # 计算当前策略的对数概率
+                mean, std = self.actor(batch_states)
+                dist = torch.distributions.Normal(mean, std)
+                batch_log_probs = dist.log_prob(batch_actions).sum(dim=1)
+                
+                # 计算概率比率
+                ratio = torch.exp(batch_log_probs - batch_old_log_probs)
+                
+                # PPO损失
+                surr1 = ratio * batch_advantages
+                surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * batch_advantages
+                actor_loss = -torch.min(surr1, surr2).mean()
+                
+                # 计算熵
+                entropy = dist.entropy().sum(dim=1).mean()
+                
+                # Critic损失
+                values = self.critic(batch_states).squeeze()
+                critic_loss = F.mse_loss(values, batch_returns)
+                
+                # 总损失
+                total_loss = (
+                    actor_loss + 
+                    self.value_coef * critic_loss - 
+                    self.entropy_coef * entropy
+                )
+                
+                # 更新网络
+                self.optimizer.zero_grad()
+                total_loss.backward()
+                self.optimizer.step()
+        
+        # 清空经验缓冲区
+        self.states = []
+        self.actions = []
+        self.rewards = []
+        self.dones = []
+        self.log_probs = []
+        self.values = []
     
-    def _compute_returns(self, rewards: torch.Tensor) -> torch.Tensor:
-        """Compute discounted returns."""
+    def _compute_returns(self) -> List[float]:
+        """
+        计算回报
+        
+        Returns:
+            回报列表
+        """
         returns = []
-        R = 0
-        for r in reversed(rewards):
-            R = r + self.gamma * R
-            returns.insert(0, R)
-        returns = torch.FloatTensor(returns)
-        return (returns - returns.mean()) / (returns.std() + 1e-8)
+        discounted_reward = 0
+        
+        for reward, done in reversed(list(zip(self.rewards, self.dones))):
+            if done:
+                discounted_reward = 0
+            discounted_reward = reward + self.gamma * discounted_reward
+            returns.insert(0, discounted_reward)
+        
+        return returns
     
-    def store_experience(self, experience: Experience):
-        """Store experience in buffer."""
-        self.buffer.append(experience)
+    def _compute_advantages(self, returns: List[float]) -> List[float]:
+        """
+        计算优势函数
+        
+        Args:
+            returns: 回报列表
+            
+        Returns:
+            优势函数列表
+        """
+        advantages = []
+        for value, return_ in zip(self.values, returns):
+            advantages.append(return_ - value)
+        
+        return advantages
+    
+    def allocate_budgets(self, sensitivity_scores: Dict[str, torch.Tensor], 
+                        initial_ratios: Optional[List[float]] = None) -> Dict[str, float]:
+        """
+        分配剪枝预算（简化版本，用于实际剪枝）
+        
+        Args:
+            sensitivity_scores: 各层的敏感度分数
+            initial_ratios: 初始剪枝比例
+            
+        Returns:
+            层名称到剪枝比例的字典
+        """
+        # 如果没有初始比例，使用均匀分布
+        if initial_ratios is None:
+            initial_ratios = [0.5] * self.num_layers
+        
+        # 创建初始状态
+        layer_features = []
+        for scores in sensitivity_scores.values():
+            # 每层特征：平均敏感度、敏感度标准差、通道数
+            avg_sens = scores.mean().item()
+            std_sens = scores.std().item()
+            num_channels = scores.numel()
+            layer_features.append([avg_sens, std_sens, num_channels])
+        
+        layer_features = np.array(layer_features)
+        current_ratios = np.array(initial_ratios)
+        
+        state = MDPState(layer_features, current_ratios, accuracy_drop=0.0)
+        
+        # 使用确定性策略选择动作
+        with torch.no_grad():
+            action, _, _ = self.select_action(state, deterministic=True)
+        
+        # 将动作转换为剪枝预算
+        pruning_budgets = {}
+        for i, (layer_name, _) in enumerate(sensitivity_scores.items()):
+            pruning_budgets[layer_name] = action[i].item()
+        
+        return pruning_budgets
 
-
-if __name__ == "__main__":
-    # Test R-SPAR
-    print("=== R-SPAR RL Agent Test ===\n")
-    
-    num_layers = 20
-    agent = RSPARAgent(num_layers=num_layers)
-    
-    # Simulate episode
-    print("Simulating episode...")
-    for step in range(10):
-        # Create dummy state
-        state = MDPState(
-            layer_features=np.random.rand(num_layers, 3),
-            current_ratios=np.random.rand(num_layers) * 0.5,
-            accuracy_drop=np.random.rand() * 0.05,
-            epoch=step
-        )
-        
-        # Select action
-        action, log_prob = agent.select_action(state)
-        
-        # Compute reward
-        reward = agent.compute_reward(
-            accuracy_drop=state.accuracy_drop,
-            flops_reduction=action.mean()
-        )
-        
-        print(f"Step {step}: Reward = {reward:.4f}, Mean ratio = {action.mean():.3f}")
-        
-        # Store experience
-        next_state = MDPState(
-            layer_features=np.random.rand(num_layers, 3),
-            current_ratios=action,
-            accuracy_drop=max(state.accuracy_drop - 0.005, 0),
-            epoch=step + 1
-        )
-        
-        exp = Experience(state, action, reward, next_state, False, log_prob)
-        agent.store_experience(exp)
-    
-    # Update policy
-    print("\nUpdating policy...")
-    agent.update_policy(batch_size=8, epochs=5)
-    
-    print(f"Policy losses: {len(agent.policy_losses)}")
-    print(f"Value losses: {len(agent.value_losses)}")
-    print("\nR-SPAR test completed!")
