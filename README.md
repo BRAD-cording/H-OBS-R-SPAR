@@ -129,10 +129,35 @@ Based on the experimental design for IEEE T-SMC-S submission, the following item
 ## 5. Experiment Logs & Data
 
 - [ ] **Training Logs:** `results/resnet50/mobilenetv2/efficientnet-b0/hobs_rspar/seed_*/training.log`
+- [ ] **Training Logs:** `results/resnet50/mobilenetv2/efficientnet-b0/depgraph/seed_*/training.log`
+- [ ] **Training Logs:** `results/resnet50/mobilenetv2/efficientnet-b0/jtp/seed_*/training.log`
+- [ ] **Training Logs:** `results/resnet50/mobilenetv2/efficientnet-b0/bilevel/seed_*/training.log`
+- [ ] **Training Logs:** `results/resnet50/mobilenetv2/efficientnet-b0/structalign/seed_*/training.log`
+- [ ] **Training Logs:** `results/resnet50/mobilenetv2/efficientnet-b0/udfc/seed_*/training.log`
 - [ ] **Model Checkpoints:** `results/resnet50/mobilenetv2/efficientnet-b0/hobs_rspar/seed_*/best_model.pth`
-- [ ] **ONNX Models:** `results/resnet50/mobilenetv2/efficientnet-b0/hobs_rspar/seed_*/pruned_model.onnx`
+- [ ] **Pruned Models:** `results/resnet50/mobilenetv2/efficientnet-b0/hobs_rspar/seed_*/pruned_model.pth`
+- [ ] **Pruned ONNX Models:** `results/resnet50/mobilenetv2/efficientnet-b0/hobs_rspar/seed_*/pruned_model.onnx`
+- [ ] **Pruned ONNX Models:** `results/resnet50/mobilenetv2/efficientnet-b0/depgraph/seed_*/pruned_model.onnx`
+- [ ] **Pruned ONNX Models:** `results/resnet50/mobilenetv2/efficientnet-b0/jtp/seed_*/pruned_model.onnx`
+- [ ] **Pruned ONNX Models:** `results/resnet50/mobilenetv2/efficientnet-b0/bilevel/seed_*/pruned_model.onnx`
+- [ ] **Pruned ONNX Models:** `results/resnet50/mobilenetv2/efficientnet-b0/structalign/seed_*/pruned_model.onnx`
+- [ ] **Pruned ONNX Models:** `results/resnet50/mobilenetv2/efficientnet-b0/udfc/seed_*/pruned_model.onnx`
+- [ ] **Pruned ONNX Models:** `results/resnet50/mobilenetv2/efficientnet-b0/bilevel/seed_*/pruned_model.onnx`
+- [ ] **Pruned ONNX Models:** `results/resnet50/mobilenetv2/efficientnet-b0/structalign/seed_*/pruned_model.onnx`
+- [ ] **Pruned ONNX Models:** `results/resnet50/mobilenetv2/efficientnet-b0/udfc/seed_*/pruned_model.onnx`
 - [ ] **Metrics JSON:** `results/resnet50/mobilenetv2/efficientnet-b0/hobs_rspar/seed_*/metrics.json`
+- [ ] **Metrics JSON:** `results/resnet50/mobilenetv2/efficientnet-b0/depgraph/seed_*/metrics.json`
+- [ ] **Metrics JSON:** `results/resnet50/mobilenetv2/efficientnet-b0/jtp/seed_*/metrics.json`
+- [ ] **Metrics JSON:** `results/resnet50/mobilenetv2/efficientnet-b0/jtp/seed_*/metrics.json`
+- [ ] **Metrics JSON:** `results/resnet50/mobilenetv2/efficientnet-b0/bilevel/seed_*/metrics.json`
+- [ ] **Metrics JSON:** `results/resnet50/mobilenetv2/efficientnet-b0/structalign/seed_*/metrics.json`
+- [ ] **Metrics JSON:** `results/resnet50/mobilenetv2/efficientnet-b0/udfc/seed_*/metrics.json`
 - [ ] **TensorRT Engines:** `*.trt` files for deployed models
+- [ ] **Cross-Platform Logs:** `results/resnet50/mobilenetv2/efficientnet-b0/hobs_rspar/seed_*/cross_platform.log`
+- [ ] **Cross-Platform Metrics JSON:** `results/resnet50/mobilenetv2/efficientnet-b0/hobs_rspar/seed_*/cross_platform_metrics.json`
+- [ ] **Kernel Logs:** `results/resnet50/mobilenetv2/efficientnet-b0/hobs_rspar/seed_*/kernel.log`
+- [ ] **Kernel Metrics JSON:** `results/resnet50/mobilenetv2/efficientnet-b0/hobs_rspar/seed_*/kernel_metrics.json`
+
 
 ## 6. Documentation
 
