@@ -73,10 +73,8 @@ Based on the experimental design for IEEE T-SMC-S submission, the following item
 
 | GPU                | Method | Latency (ms) | Speedup          |
 | :----------------- | :----- | :----------- | :--------------- |
-| **RTX-5090** | Ours   | 16.1         | **3.10×** |
-| **H100**     | Ours   | 14.8         | **3.23×** |
+| **RTX-3090** | Ours   | 16.1         | **3.10×** |
 | **A100**     | Ours   | 18.5         | **3.16×** |
-| **V100**     | Ours   | 23.2         | **3.17×** |
 
 ### Table 13: GPU Kernel Optimization Results
 
